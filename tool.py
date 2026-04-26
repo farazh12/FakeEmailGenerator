@@ -1,57 +1,75 @@
-import time
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
+from http.server import BaseHTTPRequestHandler
+from playwright.sync_api import sync_playwright
 from faker import Faker
+import json
+import urllib.parse
 
-# Initialize Faker
 fake = Faker()
 
-# --- CONFIGURATION: REPLACE THESE WITH YOUR WEBSITE'S ACTUAL IDs OR NAMES ---
-selectors = {
-    "first_name_field": "firstname",  # Change to your site's ID or Name
-    "last_name_field": "lastname",    # Change to your site's ID or Name
-    "email_field": "email",          # Change to your site's ID or Name
-    "password_field": "password",    # Change to your site's ID or Name
-    "submit_button": "//button[@type='submit']" # This is an XPath
-}
+class handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        # 1. Get the link from the request body
+        content_length = int(self.headers['Content-Length'])
+        post_data = self.rfile.read(content_length)
+        data = json.loads(post_data)
+        target_url = data.get("url")
 
-def fill_form():
-    url = input("Enter the website link: ")
-    
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
-    wait = WebDriverWait(driver, 10) # Wait up to 10 seconds
+        if not target_url:
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(b"Missing URL")
+            return
 
-    try:
-        driver.get(url)
+        result = self.run_automation(target_url)
 
-        # Generate data
-        f_name = fake.first_name()
-        l_name = fake.last_name()
-        email = fake.email()
-        pwd = fake.password(length=12)
+        self.send_response(200)
+        self.send_header('Content-type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps(result).encode())
 
-        # Wait for fields to be visible, then type
-        # NOTE: If your site uses IDs, change 'By.NAME' to 'By.ID'
-        wait.until(EC.presence_of_element_located((By.NAME, selectors["first_name_field"]))).send_keys(f_name)
-        wait.until(EC.presence_of_element_located((By.NAME, selectors["last_name_field"]))).send_keys(l_name)
-        wait.until(EC.presence_of_element_located((By.NAME, selectors["email_field"]))).send_keys(email)
-        wait.until(EC.presence_of_element_located((By.NAME, selectors["password_field"]))).send_keys(pwd)
+    def run_automation(self, url):
+        # Use Playwright
+        with sync_playwright() as p:
+            # NOTE: To run this on Vercel, you usually connect to a remote browser
+            # because Vercel doesn't have a local browser installed.
+            # Example using Browserless.io (you can get a free API key):
+            # browser = p.chromium.connect_over_cdp("wss://chrome.browserless.io?token=YOUR_API_KEY")
+            
+            # For local testing, use:
+            browser = p.chromium.launch(headless=True)
+            
+            context = browser.new_context()
+            page = context.new_page()
 
-        # Click the button (Using XPath for the button)
-        submit = wait.until(EC.element_to_be_clickable((By.XPATH, selectors["submit_button"])))
-        submit.click()
+            try:
+                # 1. Go to website
+                page.goto(url, wait_until="networkidle")
 
-        print(f"Successfully attempted signup for: {email}")
-        time.sleep(10) # Stay open to see results
+                # 2. Generate data
+                data = {
+                    "first": fake.first_name(),
+                    "last": fake.last_name(),
+                    "email": fake.email(),
+                    "password": fake.password()
+                }
 
-    except Exception as e:
-        print(f"Error: {e}")
-    finally:
-        driver.quit()
+                # 3. Put data in form (using common selectors)
+                # Playwright is smart: 'input[name="firstname"]' works for most modern sites
+                page.fill('input[name*="first"]', data["first"])
+                page.fill('input[name*="last"]', data["last"])
+                page.fill('input[type="email"]', data["email"])
+                page.fill('input[type="password"]', data["password"])
 
-if __name__ == "__main__":
-    fill_form()
+                # 4. Press the button
+                # Finds a button that has "Create" or "Sign" in the text
+                page.click('button:has-text("Create"), button:has-text("Sign"), input[type="submit"]')
+                
+                # Wait a moment for result
+                page.wait_for_timeout(3000)
+
+                return {"status": "success", "email_used": data["email"]}
+
+            except Exception as e:
+                return {"status": "error", "message": str(e)}
+            finally:
+                browser.close()
